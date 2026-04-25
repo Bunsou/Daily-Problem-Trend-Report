@@ -1,4 +1,4 @@
-pytrends
+serpapi
 google-generativeai
 python-dotenv
 requests
