@@ -151,6 +151,7 @@ if __name__ == "__main__":
         sys.exit(1)
     
     if not send_telegram:
-        print()
-        print("─" * 20)
-        print("To also send via Telegram, run: python deliverer.py --send")
+      print()
+      print("─" * 40)
+      print("To send via Telegram from cached data, run: python deliverer.py --send")
+      print("To run the full pipeline + send, run: python main.py")

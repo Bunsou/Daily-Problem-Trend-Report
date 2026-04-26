@@ -1,5 +1,6 @@
 import json
 from typing import TypedDict
+import sys
 
 from google import genai
 
@@ -221,72 +222,41 @@ def score_problems(problems: list[Problem]) -> list[ScoredProblem]:
 
 
 if __name__ == "__main__":
-    from fetcher import fetch_trends
-    from category_filter import filter_by_category
-    from classifier import classify_trends
-    from analyzer import analyze_trends
-    from novelty import enrich_with_novelty
-    from history import save_todays_problems
+    """
+    Dev mode: test the scorer against the most recent analyzer output.
     
-    print("Stage 0: Fetching raw trends...")
-    trends = fetch_trends()
-    print(f"  Raw: {len(trends)}")
+    Reads cached pipeline output and re-runs only the scoring stage.
+    Useful for iterating on the scorer prompt without re-running upstream stages.
     
-    print("\nStage 1a: Category filtering...")
-    trends = filter_by_category(trends)
-    print(f"  After category filter: {len(trends)}")
+    For full pipeline runs, use main.py instead.
+    """
+    from cache import load_pipeline_output
     
-    print("\nStage 1b: AI classifier...")
-    trends = classify_trends(trends)
-    print(f"  After classifier: {len(trends)}")
+    cached = load_pipeline_output()
+    if cached is None:
+        print("No pipeline cache found. Run `python main.py` first.")
+        sys.exit(1)
     
-    print(f"\nStage 2: Analyzing {len(trends)} candidates...")
-    problems = analyze_trends(trends)
-    print(f"  Found {len(problems)} problems")
-    
-    print(f"\nStage 3: Scoring {len(problems)} problems as business opportunities...")
-    scored = score_problems(problems)
-    
-    print(f"\nStage 4: Checking novelty against past 7 days...")
-    scored = enrich_with_novelty(scored)
-    
-    # Save today's results to history for tomorrow's novelty check
-    save_todays_problems(scored)
-
-    # Save to pipeline cache (for fast deliverer iteration without re-running AI)
-    from cache import save_pipeline_output
-    save_pipeline_output(scored)
-    
-    print()
-    
-    if not scored:
-        print("=" * 60)
-        print("No qualifying opportunities today.")
-        print("=" * 60)
-        print("\nToday's trends were mostly news, entertainment, or problems")
-        print("without indie-viable business angles. This is a normal outcome")
-        print("on quiet days. Check back tomorrow.\n")
-    else:
-        # Map novelty to display emoji
-        novelty_icons = {
-            "new": "🆕",
-            "evolving": "🔄",
-            "returning": "📅",
-            "recurring": "📈",
+    # The cache contains scored problems; re-score them as if they were unscored.
+    # We strip the existing score fields to simulate fresh input.
+    problems_for_scoring: list[Problem] = [
+        {
+            "problem_name": p["problem_name"],
+            "description": p["description"],
+            "category": p["category"],
+            "source_trends": p.get("source_trends", p.get("evidence", [])),
+            "evidence": p.get("evidence", []),
+            "countries": p["countries"],
         }
-        
-        print(f"Top {len(scored)} qualifying opportunities:\n")
-        for i, p in enumerate(scored, start=1):
-            icon = novelty_icons.get(p.get("novelty", "new"), "🆕")
-            novelty_label = p.get("novelty", "new").upper()
-            
-            print(f"{i}. {icon} [{novelty_label}] {p['problem_name']} [{p['category']}] — Score: {p['opportunity_score']}")
-            print(f"   Demand: {p['demand']}/10 | Monetization: {p['monetization']}/10 | Buildability: {p['buildability']}/10")
-            print(f"   📊 {p.get('novelty_note', '')}")
-            print(f"   🎯 Buyer test: {p['buyer_test']}")
-            print(f"   💡 Insight: {p['key_insight']}")
-            print(f"   Description: {p['description']}")
-            print(f"   Solutions:")
-            for s in p['solutions']:
-                print(f"     • {s}")
-            print()
+        for p in cached
+    ]
+    
+    print(f"Re-scoring {len(problems_for_scoring)} problems from cache...\n")
+    scored = score_problems(problems_for_scoring)
+    
+    print(f"Scored {len(scored)} qualifying opportunities:\n")
+    for i, p in enumerate(scored, start=1):
+        print(f"{i}. {p['problem_name']} — Score: {p['opportunity_score']}")
+        print(f"   D:{p['demand']} M:{p['monetization']} B:{p['buildability']}")
+        print(f"   {p['key_insight']}")
+        print()
