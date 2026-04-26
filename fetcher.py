@@ -2,10 +2,10 @@ from typing import Optional, TypedDict
 
 import serpapi
 from config import SERPAPI_KEY
+from cache import save_cache, load_cache
 
 
 # Strategic country list for global problem discovery.
-# Each country = 1 API call. Keep at 2 to fit SerpApi free tier.
 DEFAULT_COUNTRIES = ["US", "GB"]
 
 
@@ -13,18 +13,21 @@ class TrendEntry(TypedDict):
     """A single trending search aggregated across countries."""
     query: str
     countries: list[str]
+    categories: list[str]
+    search_volume: str
+    related_queries: list[str]
 
 
-def fetch_trends_for_country(country: str, hours: int = 24) -> list[str]:
+def fetch_trends_for_country(country: str, hours: int = 24) -> list[dict]:
     """
     Fetch trending searches from a single country via SerpApi.
     
     Args:
-        country: Two-letter country code (e.g., "US", "IN").
+        country: Two-letter country code (e.g., "US", "GB").
         hours: Time window. Must be 4, 24, 48, or 168.
     
     Returns:
-        A list of trending query strings. Empty list on failure.
+        A list of raw trend dicts from SerpApi. Empty list on failure.
     """
     try:
         client = serpapi.Client(api_key=SERPAPI_KEY)
@@ -36,8 +39,7 @@ def fetch_trends_for_country(country: str, hours: int = 24) -> list[str]:
             "hl": "en",
         })
         
-        trending = results.get("trending_searches", [])
-        return [item["query"] for item in trending if "query" in item]
+        return results.get("trending_searches", [])
     
     except serpapi.HTTPError as e:
         print(f"SerpApi error for {country}: {e.status_code} — {e}")
@@ -52,6 +54,11 @@ def fetch_trends(
     countries: Optional[list[str]] = None,
     hours: int = 24,
 ) -> list[TrendEntry]:
+    cached = load_cache("raw_trends")
+    if cached is not None:
+        print("Using cached trends from earlier today.")
+        return cached
+
     """
     Fetch trending searches from multiple countries and combine them.
     
@@ -60,48 +67,65 @@ def fetch_trends(
         hours: Time window for each fetch.
     
     Returns:
-        A list of TrendEntry dicts, each with 'query' and 'countries' (where 
-        it trended). Deduplicated: if the same trend appears in multiple 
-        countries, it's merged into one entry with all countries listed.
+        A list of TrendEntry dicts with rich metadata. Deduplicated and
+        sorted by global signal strength (countries appeared in).
     """
     if countries is None:
         countries = DEFAULT_COUNTRIES
     
-    # Dictionary to track each unique trend and which countries it came from.
-    # Keyed by the normalized (lowercase) query string.
     trend_map: dict[str, TrendEntry] = {}
     
     for country in countries:
         print(f"Fetching trends for {country}...")
-        country_trends = fetch_trends_for_country(country, hours=hours)
+        raw_trends = fetch_trends_for_country(country, hours=hours)
         
-        for query in country_trends:
-            # Normalize to avoid duplicates like "Iphone" vs "iPhone"
+        for raw in raw_trends:
+            query = raw.get("query")
+            if not query:
+                continue
+            
             key = query.lower().strip()
             
+            # Extract category names from the categories field
+            raw_categories = raw.get("categories", [])
+            category_names = [
+                c.get("name", "") for c in raw_categories 
+                if isinstance(c, dict) and c.get("name")
+            ]
+            
             if key not in trend_map:
-                trend_map[key] = {"query": query, "countries": []}
+                trend_map[key] = {
+                    "query": query,
+                    "countries": [],
+                    "categories": category_names,
+                    "search_volume": raw.get("search_volume", ""),
+                    "related_queries": raw.get("trend_breakdown", [])[:5],
+                }
             
             if country not in trend_map[key]["countries"]:
                 trend_map[key]["countries"].append(country)
+            
+            # If a later country has different categories, merge them
+            for cat in category_names:
+                if cat not in trend_map[key]["categories"]:
+                    trend_map[key]["categories"].append(cat)
     
-    # Convert map back to list, sorted by global signal strength.
-    # Trends appearing in multiple countries are stronger signals.
     combined = list(trend_map.values())
     combined.sort(key=lambda x: len(x["countries"]), reverse=True)
     
+    save_cache("raw_trends", combined)
     return combined
 
 
-# if __name__ == "__main__":
-#     trends = fetch_trends()
-#     print(f"\nFetched {len(trends)} unique trends across countries:\n")
-#     for i, trend in enumerate(trends, start=1):
-#         countries_str = ", ".join(trend["countries"])
-#         print(f"{i}. [{countries_str}] {trend['query']}")
-
-# if __name__ == "__main__":
-#     trend = fetch_trends_for_country("KH")
-#     print(f"\nFetched {len(trend)} unique trends for KH:\n")
-#     for i, t in enumerate(trend, start=1):
-#         print(f"{i}. {t}")
+if __name__ == "__main__":
+    trends = fetch_trends()
+    print(f"\nFetched {len(trends)} unique trends across countries:\n")
+    for i, trend in enumerate(trends[:10], start=1):  # show first 10
+        countries_str = ", ".join(trend["countries"])
+        cats_str = ", ".join(trend["categories"]) or "uncategorized"
+        print(f"{i}. [{countries_str}] {trend['query']}")
+        print(f"   Categories: {cats_str}")
+        print(f"   Volume: {trend['search_volume']}")
+        print()
+    
+    print(f"... and {len(trends) - 10} more trends" if len(trends) > 10 else "")

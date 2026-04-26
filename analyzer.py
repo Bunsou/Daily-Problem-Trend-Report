@@ -7,7 +7,6 @@ from config import GEMINI_API_KEY
 from fetcher import TrendEntry
 
 
-# Create a single Gemini client when this module loads
 _client = genai.Client(api_key=GEMINI_API_KEY)
 
 
@@ -15,86 +14,111 @@ class Problem(TypedDict):
     """A real problem identified from trending searches."""
     problem_name: str
     description: str
+    evidence: list[str]
     category: str
-    source_trends: list[str]
+    source_trends: list[str]  # keep for backward compat — populate from evidence
     countries: list[str]
 
 
-# The model we use. Flash is fast and cheap; perfect for filtering tasks.
 MODEL_NAME = "gemini-2.5-flash-lite"
 
 
 def build_prompt(trends: list[TrendEntry]) -> str:
     """
-    Build the prompt that tells Gemini how to filter and classify trends.
+    Build the Stage 2 deep-analysis prompt.
     
-    Args:
-        trends: Raw trending searches from the fetcher.
-    
-    Returns:
-        A complete prompt string ready to send to Gemini.
+    Designed to extract sharp, actionable problems and refuse to
+    fabricate problems from topical interest.
     """
-    # Format trends as a readable list for the AI
-    trends_text = "\n".join(
-        f"- \"{t['query']}\" (trending in: {', '.join(t['countries'])})"
-        for t in trends
-    )
+    trend_lines = []
+    for t in trends:
+        line = f"- \"{t['query']}\" (in: {', '.join(t['countries'])})"
+        
+        if t["categories"]:
+            line += f" [{', '.join(t['categories'])}]"
+        
+        if t["related_queries"]:
+            related = ", ".join(t["related_queries"][:3])
+            line += f"\n  Related searches: {related}"
+        
+        trend_lines.append(line)
     
-    prompt = f"""You are a trend analyst specializing in identifying real-world problems people are trying to solve.
+    trends_text = "\n\n".join(trend_lines)
+    
+    prompt = f"""You are a problem-discovery analyst. Your ONLY job is to identify trends that demonstrate active problem-solving behavior — not topical interest, not curiosity, not news consumption.
 
-I will give you a list of today's trending Google searches from multiple countries. Your job is to identify which trends represent **real problems** that people need help with, and filter out everything else.
+# The single rule that governs everything
 
-## What counts as a real problem
-A real problem is something where:
-- People are seeking a solution, advice, or way to fix something
-- It causes pain, frustration, confusion, or financial cost
-- A product, service, or tool could plausibly solve it
+A trend qualifies as a "problem" ONLY if the search query itself, or the related queries, demonstrate that the searcher is **actively trying to solve, fix, choose, find, or understand how to do something**.
 
-## What to EXCLUDE (do not include these)
-- Celebrity news, gossip, or entertainment (e.g., "Taylor Swift tour")
-- Sports scores, schedules, or team news (e.g., "NFL playoffs")
-- Movie/TV/music releases (e.g., "new Marvel movie")
-- Political events or election news (e.g., "presidential debate")
-- Product launches that aren't problems (e.g., "iPhone 17 release date")
-- Memes or viral content
-- Weather events unless directly tied to a problem people need to solve
+This means the linguistic shape of the search must contain solution-seeking intent. Examples:
 
-## Today's trending searches
+✅ QUALIFIES (clear solution-seeking):
+- "how to dispute a denied insurance claim"
+- "best way to consolidate student loans"
+- "find lawyer for car accident"
+- "alternatives to [expensive software]"
+- "why is my [thing] doing [bad outcome]"
+
+❌ DOES NOT QUALIFY (topical interest, not problem-solving):
+- "Pfizer stock" — interest in a company, no pain
+- "Trump immigration" — political news consumption
+- "iPhone 17" — product curiosity
+- "London weather" — informational lookup
+- "San Diego Zoo" — entertainment/leisure browsing
+- "[celebrity name]" — gossip
+- Company names, person names, place names, event names alone
+
+# What this means in practice
+
+Most trends do not qualify. That is correct and expected. A typical good output is **3 to 7 sharp problems**, not 15 vague ones. If you find yourself "inferring" a problem from a trend that's actually just topical interest, STOP. That's the failure mode this prompt exists to prevent.
+
+You are NOT trying to maximize output count. You are trying to maximize output quality. Returning 4 sharp problems is far better than 12 mushy ones.
+
+# How to extract a qualifying problem
+
+For each cluster of qualifying trends, extract:
+
+1. **problem_name** (max 8 words): The specific pain, framed as a problem people face. NOT a category. NOT a topic.
+   - Good: "Disputing rejected health insurance claims"
+   - Bad: "Health-related concerns" or "Personal wellness management"
+
+2. **description** (one sentence): What is the actual struggle? What action are people trying to take and what's blocking them?
+   - Good: "Patients whose claims were denied are searching for templates and steps to file appeals before deadlines expire."
+   - Bad: "People are interested in their health and managing wellness."
+
+3. **evidence**: List 2-4 source trends from the input that DIRECTLY demonstrate solution-seeking. If you can't find at least 2 trends with explicit solution-seeking language, this is not a real problem — skip it.
+
+4. **category**: one of: health, finance, tech, education, housing, legal, career, relationships, lifestyle, other
+
+5. **countries**: country codes from the source trends
+
+# When to return nothing
+
+If fewer than 3 trends in the entire input demonstrate clear solution-seeking, return an empty array []. This is a valid and correct output. Manufacturing problems from topical interest is the worst thing you can do.
+
+# Today's trends to analyze
 {trends_text}
 
-## Your task
-Group related trends together. For each real problem you identify, return a JSON object with these exact fields:
-- "problem_name": short descriptive name (max 8 words)
-- "description": one sentence explaining the actual problem people face
-- "category": one of: "health", "finance", "tech", "education", "housing", "legal", "career", "relationships", "lifestyle", "other"
-- "source_trends": list of the original trend strings that pointed to this problem
-- "countries": list of country codes where these trends appeared
+# Output format
+Return ONLY a JSON array. No markdown fences, no commentary.
 
-Return ONLY a valid JSON array. No markdown code fences, no commentary, no explanation. If you find no real problems, return an empty array: []
-
-Example output format:
+Example of GOOD output:
 [
   {{
-    "problem_name": "Student loan repayment confusion",
-    "description": "Borrowers are unsure how new 2026 forgiveness rules apply to them.",
-    "category": "finance",
-    "source_trends": ["student loan forgiveness 2026"],
+    "problem_name": "Filing post-accident insurance claims",
+    "description": "Drivers in recent accidents are searching for step-by-step guidance on documenting damage and filing claims before deadlines.",
+    "evidence": ["how to file accident claim", "what to do after car crash insurance"],
+    "category": "legal",
     "countries": ["US", "GB"]
   }}
 ]
 """
     return prompt
 
-
 def analyze_trends(trends: list[TrendEntry]) -> list[Problem]:
     """
-    Send trends to Gemini for filtering and problem identification.
-    
-    Args:
-        trends: Raw trending searches from the fetcher.
-    
-    Returns:
-        A list of identified Problem dicts. Empty list on failure or no problems.
+    Stage 2 analyzer: deep grouping and classification of pre-filtered trends.
     """
     if not trends:
         print("No trends to analyze.")
@@ -112,7 +136,6 @@ def analyze_trends(trends: list[TrendEntry]) -> list[Problem]:
         
         raw_text = (response.text or "").strip()
         
-        # Defensive: strip markdown code fences if Gemini adds them despite instructions
         if raw_text.startswith("```"):
             raw_text = raw_text.split("```")[1]
             if raw_text.startswith("json"):
@@ -120,9 +143,15 @@ def analyze_trends(trends: list[TrendEntry]) -> list[Problem]:
             raw_text = raw_text.strip()
         
         problems = json.loads(raw_text)
+
+        # After json.loads succeeds and you verify it's a list:
+        for problem in problems:
+            # Backward compat: scorer expects source_trends
+            if "evidence" in problem and "source_trends" not in problem:
+                problem["source_trends"] = problem["evidence"]
         
         if not isinstance(problems, list):
-            print(f"Unexpected response shape: expected list, got {type(problems)}")
+            print(f"Unexpected response shape: {type(problems)}")
             return []
         
         return problems
@@ -139,11 +168,22 @@ def analyze_trends(trends: list[TrendEntry]) -> list[Problem]:
 
 if __name__ == "__main__":
     from fetcher import fetch_trends
+    from category_filter import filter_by_category
+    from classifier import classify_trends
     
-    print("Fetching trends...")
+    print("Stage 0: Fetching raw trends...")
     trends = fetch_trends()
+    print(f"  Raw: {len(trends)}")
     
-    print(f"\nAnalyzing {len(trends)} trends with Gemini...\n")
+    print("\nStage 1a: Category filtering...")
+    trends = filter_by_category(trends)
+    print(f"  After category filter: {len(trends)}")
+    
+    print("\nStage 1b: AI classifier...")
+    trends = classify_trends(trends)
+    print(f"  After classifier: {len(trends)}")
+    
+    print(f"\nStage 2: Deep analysis on {len(trends)} candidates...\n")
     problems = analyze_trends(trends)
     
     print(f"Identified {len(problems)} real problems:\n")
