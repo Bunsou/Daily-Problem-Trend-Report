@@ -26,7 +26,7 @@ from history import save_todays_problems
 from cache import save_pipeline_output
 from deliverer import deliver
 from telegram_client import send_message, TelegramError
-from pipeline_cache import cached_stage, clear_todays_cache
+from pipeline_cache import cached_stage, cleanup_old_caches, clear_todays_cache
 
 
 def log(message: str) -> None:
@@ -49,6 +49,10 @@ def run_pipeline(send_telegram: bool = True, fresh: bool = False) -> int:
     log("=" * 60)
     log("Trend Engine — pipeline start")
     log("=" * 60)
+
+    deleted = cleanup_old_caches(keep_days=3)
+    if deleted > 0:
+        log(f"Cleaned up {deleted} old cache files")
     
     if fresh:
         deleted = clear_todays_cache()
