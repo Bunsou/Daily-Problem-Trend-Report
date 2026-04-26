@@ -25,3 +25,40 @@ def load_cache(name: str):
         with open(path) as f:
             return json.load(f)
     return None
+
+
+# === Pipeline output caching (separate from date-keyed fetcher cache) ===
+
+PIPELINE_OUTPUT_FILE = f"{CACHE_DIR}/pipeline_output.json"
+
+
+def save_pipeline_output(problems) -> None:
+    """
+    Persist the final scored + novelty-enriched output of the pipeline.
+    
+    Unlike the date-keyed fetcher cache, this is a single rolling file
+    that always holds the most recent run's output. Used for fast 
+    iteration on the deliverer without re-running expensive AI stages.
+    """
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(PIPELINE_OUTPUT_FILE, "w") as f:
+        json.dump(problems, f, indent=2)
+    print(f"Saved pipeline output to {PIPELINE_OUTPUT_FILE} ({len(problems)} problems).")
+
+
+def load_pipeline_output():
+    """
+    Load the most recently cached pipeline output.
+    
+    Returns:
+        A list of scored problem dicts, or None if no cache exists.
+    """
+    if not os.path.exists(PIPELINE_OUTPUT_FILE):
+        return None
+    
+    try:
+        with open(PIPELINE_OUTPUT_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"Warning: could not read pipeline cache: {e}")
+        return None

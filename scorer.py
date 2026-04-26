@@ -252,6 +252,10 @@ if __name__ == "__main__":
     
     # Save today's results to history for tomorrow's novelty check
     save_todays_problems(scored)
+
+    # Save to pipeline cache (for fast deliverer iteration without re-running AI)
+    from cache import save_pipeline_output
+    save_pipeline_output(scored)
     
     print()
     
