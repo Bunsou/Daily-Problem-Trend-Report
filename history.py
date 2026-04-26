@@ -1,113 +1,128 @@
 """
 Persistence layer for past problem outputs.
 
-Stores the top scored problems from each day so the novelty detector
-can compare today's findings against recent history.
+Stores the top scored problems from each day in Postgres so the novelty
+detector can compare today's findings against recent history. The storage
+backend is a single `novelty_history` table; see `db.py` and the Alembic
+migration for the schema.
+
+All public functions degrade gracefully if the database is unreachable —
+they log a warning and return safe defaults rather than raising, so a
+DB outage cannot crash the pipeline.
 """
-import json
-import os
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
+
+from sqlalchemy import delete, select
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import SQLAlchemyError
+
+from db import NoveltyHistory, get_session
 
 if TYPE_CHECKING:
     from scorer import ScoredProblem
 
 
-HISTORY_DIR = ".cache/history"
 HISTORY_WINDOW_DAYS = 7
-
-
-def _ensure_history_dir() -> None:
-    """Create the history directory if it doesn't exist."""
-    os.makedirs(HISTORY_DIR, exist_ok=True)
-
-
-def _history_path(date_str: str) -> str:
-    """Build the file path for a given date's history."""
-    return os.path.join(HISTORY_DIR, f"{date_str}.json")
 
 
 def save_todays_problems(problems: list["ScoredProblem"]) -> None:
     """
-    Persist today's top scored problems to disk.
-    
-    Stores only the fields needed for novelty matching, not the full
-    ScoredProblem (which includes large fields like solutions).
+    Persist today's top scored problems to the database.
+
+    Idempotent: if rows for today already exist, they are deleted and
+    replaced in a single transaction so re-running the pipeline on the
+    same day doesn't accumulate duplicates.
+
+    On any database error, logs a warning and returns without raising.
     """
-    _ensure_history_dir()
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    # Strip down to matching-essential fields. Smaller files, cleaner reads.
-    minimal = [
-        {
-            "problem_name": p["problem_name"],
-            "description": p["description"],
-            "category": p["category"],
-            "opportunity_score": p["opportunity_score"],
-        }
-        for p in problems
-    ]
-    
-    with open(_history_path(today), "w") as f:
-        json.dump(minimal, f, indent=2)
+    if not problems:
+        return
+
+    today = datetime.now().date()
+
+    try:
+        with get_session() as session:
+            session.execute(
+                delete(NoveltyHistory).where(NoveltyHistory.run_date == today)
+            )
+            session.add_all(
+                NoveltyHistory(
+                    run_date=today,
+                    problem_name=p["problem_name"],
+                    description=p["description"],
+                    category=p["category"],
+                    opportunity_score=p["opportunity_score"],
+                )
+                for p in problems
+            )
+            session.commit()
+    except SQLAlchemyError as e:
+        print(f"Warning: could not save today's history to database: {e}")
+    except Exception as e:
+        print(f"Warning: unexpected error saving today's history: {e}")
 
 
 def load_recent_history(days: int = HISTORY_WINDOW_DAYS) -> list[dict]:
     """
-    Load problems from the past N days (excluding today).
-    
-    Returns:
-        A flat list of {problem_name, description, category, date, days_ago}
-        dicts, sorted with most recent first.
+    Load problems from the past N days, excluding today.
+
+    Returns a flat list of {problem_name, description, category, date,
+    days_ago} dicts, ordered by most recent run_date first. On any
+    database error, logs a warning and returns an empty list so the
+    pipeline can continue (every problem will be tagged "new").
     """
-    _ensure_history_dir()
     today = datetime.now().date()
-    
-    history: list[dict] = []
-    
-    for days_ago in range(1, days + 1):
-        date = today - timedelta(days=days_ago)
-        date_str = date.strftime("%Y-%m-%d")
-        path = _history_path(date_str)
-        
-        if not os.path.exists(path):
-            continue
-        
-        try:
-            with open(path) as f:
-                problems = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            print(f"Warning: skipping corrupt history file {date_str}: {e}")
-            continue
-        
-        for p in problems:
-            history.append({
-                **p,
-                "date": date_str,
-                "days_ago": days_ago,
-            })
-    
-    return history
+    start = today - timedelta(days=days)
+    end = today - timedelta(days=1)
+
+    try:
+        with get_session() as session:
+            rows = session.execute(
+                select(NoveltyHistory)
+                .where(NoveltyHistory.run_date >= start)
+                .where(NoveltyHistory.run_date <= end)
+                .order_by(NoveltyHistory.run_date.desc())
+            ).scalars().all()
+    except SQLAlchemyError as e:
+        print(f"Warning: could not load recent history from database: {e}")
+        return []
+    except Exception as e:
+        print(f"Warning: unexpected error loading recent history: {e}")
+        return []
+
+    return [
+        {
+            "problem_name": row.problem_name,
+            "description": row.description,
+            "category": row.category,
+            "date": row.run_date.strftime("%Y-%m-%d"),
+            "days_ago": (today - row.run_date).days,
+        }
+        for row in rows
+    ]
 
 
-def cleanup_old_history(keep_days: int = 30) -> None:
+def cleanup_old_history(keep_days: int = 30) -> int:
     """
-    Delete history files older than keep_days. Optional housekeeping.
-    
-    Run this occasionally to prevent unbounded disk growth.
+    Delete history rows older than keep_days. Optional housekeeping.
+
+    Returns the number of rows deleted. On any database error, logs a
+    warning and returns 0.
     """
-    _ensure_history_dir()
     today = datetime.now().date()
     cutoff = today - timedelta(days=keep_days)
-    
-    for filename in os.listdir(HISTORY_DIR):
-        if not filename.endswith(".json"):
-            continue
-        
-        try:
-            file_date = datetime.strptime(filename[:-5], "%Y-%m-%d").date()
-            if file_date < cutoff:
-                os.remove(os.path.join(HISTORY_DIR, filename))
-        except ValueError:
-            # Filename isn't in expected format; skip it
-            continue
+
+    try:
+        with get_session() as session:
+            result: CursorResult = session.execute(  # type: ignore[assignment]
+                delete(NoveltyHistory).where(NoveltyHistory.run_date < cutoff)
+            )
+            session.commit()
+            return result.rowcount or 0
+    except SQLAlchemyError as e:
+        print(f"Warning: could not clean up old history: {e}")
+        return 0
+    except Exception as e:
+        print(f"Warning: unexpected error cleaning up old history: {e}")
+        return 0
