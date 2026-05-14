@@ -7,16 +7,13 @@ tagging each problem with its novelty status.
 import json
 from typing import TYPE_CHECKING
 
-from google import genai
-
-from config import GEMINI_API_KEY
-from history import load_recent_history
+from app.clients.gemini import client as _client
+from app.services.history import load_recent_history
 
 if TYPE_CHECKING:
-    from scorer import ScoredProblem
+    from app.pipeline.scorer import ScoredProblem
 
 
-_client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_NAME = "gemini-2.5-flash-lite"
 
 

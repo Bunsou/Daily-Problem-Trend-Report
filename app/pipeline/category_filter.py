@@ -1,4 +1,4 @@
-from fetcher import TrendEntry
+from app.pipeline.fetcher import TrendEntry
 
 
 # Categories that almost never represent real problems.
@@ -50,7 +50,7 @@ def filter_by_category(trends: list[TrendEntry]) -> list[TrendEntry]:
 
 
 if __name__ == "__main__":
-    from fetcher import fetch_trends
+    from app.pipeline.fetcher import fetch_trends
     
     print("Fetching trends...")
     raw = fetch_trends()

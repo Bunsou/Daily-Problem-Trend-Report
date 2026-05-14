@@ -1,13 +1,8 @@
 import json
 from typing import TypedDict
 
-from google import genai
-
-from config import GEMINI_API_KEY
-from fetcher import TrendEntry
-
-
-_client = genai.Client(api_key=GEMINI_API_KEY)
+from app.clients.gemini import client as _client
+from app.pipeline.fetcher import TrendEntry
 
 
 class Problem(TypedDict):
@@ -167,9 +162,9 @@ def analyze_trends(trends: list[TrendEntry]) -> list[Problem]:
 
 
 if __name__ == "__main__":
-    from fetcher import fetch_trends
-    from category_filter import filter_by_category
-    from classifier import classify_trends
+    from app.pipeline.fetcher import fetch_trends
+    from app.pipeline.category_filter import filter_by_category
+    from app.pipeline.classifier import classify_trends
     
     print("Stage 0: Fetching raw trends...")
     trends = fetch_trends()

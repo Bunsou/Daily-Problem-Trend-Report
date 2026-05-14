@@ -10,10 +10,10 @@ Programmatic callers can use deliver(problems, send_telegram=True) directly.
 import sys
 from typing import TYPE_CHECKING
 
-from telegram_client import send_message, TelegramError
+from app.clients.telegram import send_message, TelegramError
 
 if TYPE_CHECKING:
-    from scorer import ScoredProblem
+    from app.pipeline.scorer import ScoredProblem
 
 
 # Maps novelty status to display emoji
@@ -128,7 +128,7 @@ def deliver(
 # === Dev mode entry point ===
 
 if __name__ == "__main__":
-    from cache import load_pipeline_output
+    from app.services.cache import load_pipeline_output
     
     # Check for --send flag in command-line args
     send_telegram = "--send" in sys.argv
@@ -137,7 +137,7 @@ if __name__ == "__main__":
     
     if cached is None:
         print("No pipeline cache found.")
-        print("Run `python scorer.py` first to generate and cache pipeline output.")
+        print("Run `python -m app.pipeline.scorer` first to generate and cache pipeline output.")
         print("After that, this script will use the cache for fast iteration.")
         sys.exit(1)
     
@@ -153,5 +153,5 @@ if __name__ == "__main__":
     if not send_telegram:
       print()
       print("─" * 40)
-      print("To send via Telegram from cached data, run: python deliverer.py --send")
-      print("To run the full pipeline + send, run: python main.py")
+      print("To send via Telegram from cached data, run: python -m app.pipeline.deliverer --send")
+      print("To run the full pipeline + send, run: python -m app.pipeline.orchestrator")

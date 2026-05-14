@@ -17,10 +17,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import SQLAlchemyError
 
-from db import NoveltyHistory, get_session
+from app.db.models import NoveltyHistory
+from app.db.session import get_session
 
 if TYPE_CHECKING:
-    from scorer import ScoredProblem
+    from app.pipeline.scorer import ScoredProblem
 
 
 HISTORY_WINDOW_DAYS = 7

@@ -8,25 +8,29 @@ Each network-touching stage is wrapped with caching and automatic retry.
 On retry within the same day, completed stages are reused from cache.
 
 Usage:
-    python main.py              # run end-to-end, send to Telegram
-    python main.py --no-send    # run end-to-end, print only (no Telegram)
-    python main.py --fresh      # ignore today's cache, re-run all stages
+    python -m app.pipeline.orchestrator              # run end-to-end, send to Telegram
+    python -m app.pipeline.orchestrator --no-send    # run end-to-end, print only (no Telegram)
+    python -m app.pipeline.orchestrator --fresh      # ignore today's cache, re-run all stages
 """
 import sys
 import traceback
 from datetime import datetime
 
-from fetcher import fetch_trends
-from category_filter import filter_by_category
-from classifier import classify_trends
-from analyzer import analyze_trends
-from scorer import score_problems
-from novelty import enrich_with_novelty
-from history import save_todays_problems
-from cache import save_pipeline_output
-from deliverer import deliver
-from telegram_client import send_message, TelegramError
-from pipeline_cache import cached_stage, cleanup_old_caches, clear_todays_cache
+from app.pipeline.fetcher import fetch_trends
+from app.pipeline.category_filter import filter_by_category
+from app.pipeline.classifier import classify_trends
+from app.pipeline.analyzer import analyze_trends
+from app.pipeline.scorer import score_problems
+from app.pipeline.novelty import enrich_with_novelty
+from app.pipeline.deliverer import deliver
+from app.services.history import save_todays_problems
+from app.services.cache import (
+    save_pipeline_output,
+    cached_stage,
+    cleanup_old_caches,
+    clear_todays_cache,
+)
+from app.clients.telegram import send_message, TelegramError
 
 
 def log(message: str) -> None:
@@ -122,7 +126,7 @@ def run_pipeline(send_telegram: bool = True, fresh: bool = False) -> int:
         log("=" * 60)
         log(f"⚠️  Telegram delivery failed after retries: {e}")
         log("Briefing was generated — content is in pipeline cache.")
-        log("Run `python deliverer.py --send` to retry delivery without re-running pipeline.")
+        log("Run `python -m app.pipeline.deliverer --send` to retry delivery without re-running pipeline.")
         log("=" * 60)
         return 1
     

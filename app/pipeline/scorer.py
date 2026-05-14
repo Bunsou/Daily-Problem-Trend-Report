@@ -2,13 +2,8 @@ import json
 from typing import TypedDict
 import sys
 
-from google import genai
-
-from config import GEMINI_API_KEY
-from analyzer import Problem
-
-
-_client = genai.Client(api_key=GEMINI_API_KEY)
+from app.clients.gemini import client as _client
+from app.pipeline.analyzer import Problem
 
 MODEL_NAME = "gemini-2.5-flash"
 
@@ -228,13 +223,13 @@ if __name__ == "__main__":
     Reads cached pipeline output and re-runs only the scoring stage.
     Useful for iterating on the scorer prompt without re-running upstream stages.
     
-    For full pipeline runs, use main.py instead.
+    For full pipeline runs, use `python -m app.pipeline.orchestrator` instead.
     """
-    from cache import load_pipeline_output
+    from app.services.cache import load_pipeline_output
     
     cached = load_pipeline_output()
     if cached is None:
-        print("No pipeline cache found. Run `python main.py` first.")
+        print("No pipeline cache found. Run `python -m app.pipeline.orchestrator` first.")
         sys.exit(1)
     
     # The cache contains scored problems; re-score them as if they were unscored.
