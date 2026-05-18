@@ -1,21 +1,39 @@
 import json
+import logging
+import time
 from typing import TypedDict
 import sys
 
 from app.clients.gemini import client as _client
 from app.pipeline.analyzer import Problem
 
-MODEL_NAME = "gemini-2.5-flash"
+logger = logging.getLogger(__name__)
+
+MODEL_NAME = "gemini-2.5-flash-lite"
 
 # Below this score, problems are filtered out as non-opportunities.
 # 4.5 means at least one dimension must be 6+ AND the others must be at least 4.
 # This catches indie-viable opportunities while removing clear non-businesses.
 MIN_OPPORTUNITY_SCORE = 4.5
 
+# Maximum problems per scorer API call. The scorer prompt is verbose; sending
+# 100+ problems at once risks a connection drop. Batching keeps each call to a
+# size Gemini handles reliably, then results are merged and sorted globally.
+SCORER_BATCH_SIZE = 25
+
+# Seconds to sleep between scorer batches (gives gemini-2.5-flash breathing room).
+SCORER_BATCH_SLEEP = 3.0
+
+# Sleep durations before each retry attempt (exponential-ish backoff).
+# gemini-2.5-flash resets connections on the first call after idle; giving it
+# progressively more time to recover avoids losing whole batches.
+SCORER_RETRY_DELAYS = [5, 15, 30]
+
 
 class ScoredProblem(Problem):
     """A Problem enriched with business opportunity scoring."""
     buyer_test: str
+    potential_customer: str  # display-friendly buyer naming (1-2 sentences)
     demand: int
     monetization: int
     buildability: int
@@ -51,6 +69,22 @@ You must name:
 4. An adjacent category where this buyer ALREADY spends money (proves willingness)
 
 If you cannot complete this sentence with a concrete, named buyer who already spends money in adjacent categories, the problem fails the buyer test. Apply scoring penalties below.
+
+# Display-friendly buyer naming
+
+After applying the buyer test for scoring rigor, ALSO produce a short `potential_customer` field — 1-2 sentences naming the buyer persona with just enough context to make it concrete. This is what the end user sees in the briefing; the verbose `buyer_test` line is internal-only and is NOT displayed.
+
+Good (concrete, named, immediately recognizable):
+- "Personal injury law firms — they already buy leads via Google Ads."
+- "Small business HR managers handling first-time disputes."
+- "Solo bookkeepers managing 5–20 clients via QuickBooks."
+
+Bad (vague, restates the buyer test, or generic):
+- "Anyone interested in legal services."
+- "People who want to manage their personal finances."
+- A full sentence repeating the buyer_test rationale.
+
+If the buyer test fails, set `potential_customer` to "No clear buyer." rather than fabricating one.
 
 # Scoring dimensions (1-10)
 
@@ -97,6 +131,7 @@ Reject your own draft solutions if they sound impressive but don't pass these te
 Return ONLY a JSON array. For each problem:
 - "problem_index": integer matching input order
 - "buyer_test": ONE sentence following the template above; or "FAILS — no specific buyer identifiable"
+- "potential_customer": 1-2 sentences naming the buyer persona (display-friendly; NOT the buyer_test rationale)
 - "demand": integer 1-10
 - "monetization": integer 1-10
 - "buildability": integer 1-10
@@ -110,6 +145,7 @@ Example:
   {{
     "problem_index": 1,
     "buyer_test": "Personal injury law firms will pay $50-300 per qualified lead because client acquisition costs run $1500+, and they currently spend heavily on Google Ads and lead networks like 4LegalLeads.",
+    "potential_customer": "Personal injury law firms — they already buy leads via Google Ads.",
     "demand": 9,
     "monetization": 9,
     "buildability": 7,
@@ -124,96 +160,132 @@ Example:
 """
     return prompt
 
+def _build_scored(problems: list[Problem], scores: list[dict]) -> list[ScoredProblem]:
+    """Merge scorer JSON output back onto the input Problem list."""
+    score_map = {
+        item["problem_index"]: item
+        for item in scores
+        if "problem_index" in item
+    }
+    scored: list[ScoredProblem] = []
+    for i, problem in enumerate(problems):
+        score_data = score_map.get(i + 1)
+        if score_data is None:
+            logger.warning("Scorer: no score for problem #%d", i + 1)
+            continue
+
+        demand = int(score_data.get("demand", 5))
+        monetization = int(score_data.get("monetization", 5))
+        buildability = int(score_data.get("buildability", 5))
+
+        # Geometric mean penalizes weakness in any dimension.
+        # A 9-9-2 problem is a worse opportunity than 6-6-6, and this
+        # math reflects that. (9*9*2)^(1/3) = 4.3 vs (6*6*6)^(1/3) = 6.0
+        opportunity_score = (demand * monetization * buildability) ** (1 / 3)
+
+        scored.append({
+            **problem,
+            "buyer_test": score_data.get("buyer_test", ""),
+            "potential_customer": score_data.get("potential_customer", ""),
+            "demand": demand,
+            "monetization": monetization,
+            "buildability": buildability,
+            "opportunity_score": round(opportunity_score, 1),
+            "key_insight": score_data.get("key_insight", ""),
+            "solutions": score_data.get("solutions", []),
+            "novelty": problem.get("novelty", "new"),
+            "novelty_note": problem.get("novelty_note", ""),
+        })
+    return scored
+
+
+def _score_batch(problems: list[Problem]) -> list[ScoredProblem]:
+    """
+    Score one batch of problems via a single Gemini call.
+    Retries once on any failure. Returns [] if both attempts fail — never raises.
+    problem_index values in the response are 1-based relative to this batch.
+    """
+    prompt = build_scorer_prompt(problems)
+
+    max_attempts = len(SCORER_RETRY_DELAYS) + 1
+    for attempt in range(max_attempts):
+        raw_text = ""
+        try:
+            response = _client.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt,
+            )
+            raw_text = (response.text or "").strip()
+
+            if raw_text.startswith("```"):
+                raw_text = raw_text.split("```")[1]
+                if raw_text.startswith("json"):
+                    raw_text = raw_text[4:]
+                raw_text = raw_text.strip()
+
+            scores = json.loads(raw_text)
+            if not isinstance(scores, list):
+                raise ValueError(f"Expected list, got {type(scores)}")
+
+            return _build_scored(problems, scores)
+
+        except Exception as e:
+            is_last = attempt == max_attempts - 1
+            delay = SCORER_RETRY_DELAYS[attempt] if not is_last else None
+            logger.warning(
+                "Scorer: error (attempt %d/%d): %s%s",
+                attempt + 1, max_attempts, e,
+                f" — retrying in {delay}s" if delay else " — giving up",
+            )
+            if delay:
+                time.sleep(delay)
+            else:
+                print(f"Error scoring problems: {e}")
+
+    return []
+
+
 def score_problems(problems: list[Problem]) -> list[ScoredProblem]:
     """
     Score each problem on demand, monetization, and buildability.
-    
+
+    Large inputs are split into batches of SCORER_BATCH_SIZE. Results from
+    all batches are merged, sorted, and filtered globally.
+
     Returns problems sorted by opportunity_score (descending).
     """
     if not problems:
         print("No problems to score.")
         return []
-    
-    raw_text = ""
-    
-    try:
-        prompt = build_scorer_prompt(problems)
-        
-        response = _client.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-        )
-        
-        raw_text = (response.text or "").strip()
-        
-        if raw_text.startswith("```"):
-            raw_text = raw_text.split("```")[1]
-            if raw_text.startswith("json"):
-                raw_text = raw_text[4:]
-            raw_text = raw_text.strip()
-        
-        scores = json.loads(raw_text)
-        
-        if not isinstance(scores, list):
-            print(f"Unexpected response shape: {type(scores)}")
-            return []
-        
-        score_map = {
-            item["problem_index"]: item 
-            for item in scores 
-            if "problem_index" in item
-        }
-        
-        scored_problems: list[ScoredProblem] = []
-        for i, problem in enumerate(problems):
-            problem_index = i + 1
-            score_data = score_map.get(problem_index)
-            
-            if score_data is None:
-                print(f"Warning: no score for problem #{problem_index}")
-                continue
-            
-            demand = int(score_data.get("demand", 5))
-            monetization = int(score_data.get("monetization", 5))
-            buildability = int(score_data.get("buildability", 5))
-            
-            # Geometric mean penalizes weakness in any dimension.
-            # A 9-9-2 problem is a worse opportunity than 6-6-6, and this
-            # math reflects that. (9*9*2)^(1/3) = 4.3 vs (6*6*6)^(1/3) = 6.0
-            opportunity_score = (demand * monetization * buildability) ** (1/3)
-            
-            scored_problems.append({
-                **problem,
-                "buyer_test": score_data.get("buyer_test", ""),
-                "demand": demand,
-                "monetization": monetization,
-                "buildability": buildability,
-                "opportunity_score": round(opportunity_score, 1),
-                "key_insight": score_data.get("key_insight", ""),
-                "solutions": score_data.get("solutions", []),
-                "novelty": problem.get("novelty", "new"),
-                "novelty_note": problem.get("novelty_note", ""),
-            })
-        
-        # Sort and filter
-        scored_problems.sort(key=lambda p: p["opportunity_score"], reverse=True)
 
-        qualifying = [p for p in scored_problems if p["opportunity_score"] >= MIN_OPPORTUNITY_SCORE]
-        filtered_count = len(scored_problems) - len(qualifying)
+    if len(problems) <= SCORER_BATCH_SIZE:
+        all_scored = _score_batch(problems)
+    else:
+        total_batches = (len(problems) + SCORER_BATCH_SIZE - 1) // SCORER_BATCH_SIZE
+        logger.info("Scorer: %d problems → %d batches of ≤%d", len(problems), total_batches, SCORER_BATCH_SIZE)
+        print(f"  Scorer: splitting {len(problems)} problems into {total_batches} batches...")
 
-        if filtered_count > 0:
-            print(f"Filtered out {filtered_count} non-viable problems (score < {MIN_OPPORTUNITY_SCORE}).")
+        all_scored: list[ScoredProblem] = []
+        for i in range(0, len(problems), SCORER_BATCH_SIZE):
+            batch_num = i // SCORER_BATCH_SIZE + 1
+            batch = problems[i : i + SCORER_BATCH_SIZE]
+            print(f"    Batch {batch_num}/{total_batches}: {len(batch)} problems...", end=" ", flush=True)
 
-        return qualifying
-    
-    except json.JSONDecodeError as e:
-        print(f"Failed to parse AI response as JSON: {e}")
-        print(f"Raw response was:\n{raw_text}")
-        return []
-    
-    except Exception as e:
-        print(f"Error scoring problems: {e}")
-        return []
+            scored = _score_batch(batch)
+            print(f"{len(scored)} scored.")
+            all_scored.extend(scored)
+
+            if i + SCORER_BATCH_SIZE < len(problems):
+                time.sleep(SCORER_BATCH_SLEEP)
+
+    all_scored.sort(key=lambda p: p["opportunity_score"], reverse=True)
+
+    qualifying = [p for p in all_scored if p["opportunity_score"] >= MIN_OPPORTUNITY_SCORE]
+    filtered_count = len(all_scored) - len(qualifying)
+    if filtered_count > 0:
+        print(f"Filtered out {filtered_count} non-viable problems (score < {MIN_OPPORTUNITY_SCORE}).")
+
+    return qualifying
 
 
 if __name__ == "__main__":
