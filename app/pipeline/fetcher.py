@@ -1,8 +1,9 @@
 from typing import Optional, TypedDict
 
 import serpapi
-from config import SERPAPI_KEY
-from cache import save_cache, load_cache
+
+from app.core.config import settings
+from app.services.cache import save_cache, load_cache
 
 
 # Strategic country list for global problem discovery.
@@ -30,7 +31,7 @@ def fetch_trends_for_country(country: str, hours: int = 24) -> list[dict]:
         A list of raw trend dicts from SerpApi. Empty list on failure.
     """
     try:
-        client = serpapi.Client(api_key=SERPAPI_KEY)
+        client = serpapi.Client(api_key=settings.serpapi_key)
         
         results = client.search({
             "engine": "google_trends_trending_now",

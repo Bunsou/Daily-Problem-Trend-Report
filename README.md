@@ -1,27 +1,36 @@
 # Trend Engine
 
-A daily cron pipeline that fetches Google Trends, processes them through AI
-stages (classify → analyze → score → novelty), and delivers a Telegram briefing.
+A daily cron pipeline that fetches Google Trends and Reddit posts, processes
+them through AI stages (classify → analyze → score → novelty), merges results
+across sources with deduplication, and delivers a Telegram briefing.
+
+See `docs/v2-plan.md` for the design rationale behind the Reddit data source addition.
 
 ## Local setup
 
 1. Create and activate a virtualenv: `python -m venv venv && source venv/bin/activate`
 2. Install deps: `pip install -r requirements.txt`
 3. Copy `.env.example` to `.env` and fill in the required keys (see "Environment variables" below).
-4. Run the database migration: `alembic upgrade head`
-5. Run the pipeline: `python main.py --no-send` (drops the Telegram send so you can iterate)
+4. Set up Reddit credentials (see "Reddit setup" below).
+5. Run the database migration: `alembic upgrade head`
+6. Run the pipeline: `python -m app.pipeline.orchestrator --no-send` (skips Telegram so you can iterate)
 
 ## Environment variables
 
-All variables are required. The pipeline will fail fast at startup if any are missing.
+Required variables cause a startup `ValidationError` if missing. Optional ones have defaults.
 
-| Var | Purpose |
-| --- | --- |
-| `GEMINI_API_KEY` | Google Generative AI API key |
-| `SERPAPI_KEY` | SerpApi key for Google Trends fetcher |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token |
-| `TELEGRAM_CHAT_ID` | Chat ID to deliver briefings to |
-| `DATABASE_URL` | Postgres connection string (see "Database setup" below) |
+| Var | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `GEMINI_API_KEY` | yes | — | Google Generative AI API key |
+| `SERPAPI_KEY` | yes | — | SerpApi key for Google Trends fetcher |
+| `TELEGRAM_BOT_TOKEN` | yes | — | Telegram bot token |
+| `TELEGRAM_CHAT_ID` | yes | — | Chat ID to deliver briefings to |
+| `DATABASE_URL` | yes | — | Postgres connection string (see "Database setup" below) |
+| `TRIGGER_TOKEN` | yes | — | Bearer token for the FastAPI `/pipeline/trigger` endpoint |
+
+## Reddit data
+
+This project reads from Reddit's public `.json` endpoints. No API keys or authentication are required. The fetcher identifies itself with a descriptive User-Agent and is rate-limit-aware. See `app/pipeline/reddit_fetcher.py` for details.
 
 ## Database setup
 
@@ -75,22 +84,42 @@ resumes on the next run.
 This pipeline is designed to run as a [Render Cron Job](https://render.com/docs/cronjobs).
 
 1. Connect your GitHub repo in the Render dashboard.
-2. Create a new Cron Job pointing at `main.py`.
-3. Set the build command so migrations run on every deploy:
+2. Create a new Cron Job and set the build command so migrations run on every deploy:
    ```
    pip install -r requirements.txt && alembic upgrade head
    ```
-4. Set the start command:
+3. Set the start command:
    ```
-   python main.py
+   python -m app.pipeline.orchestrator
    ```
-5. Set the schedule (e.g. `0 13 * * *` for 13:00 UTC daily).
-6. Add every variable from the "Environment variables" table above as a
+4. Set the schedule (e.g. `0 13 * * *` for 13:00 UTC daily).
+5. Add every variable from the "Environment variables" table above as a
    Render environment variable, including `DATABASE_URL`.
 
 ## Operations
 
-- Re-run the pipeline manually: `python main.py` (or `--no-send` to skip Telegram, `--fresh` to ignore today's stage cache).
-- Re-deliver an already-generated briefing without re-running the pipeline:
-  `python deliverer.py --send`.
+- Re-run the pipeline: `python -m app.pipeline.orchestrator` (add `--no-send` to skip Telegram, `--fresh` to ignore today's stage cache).
+- Re-deliver a cached briefing without re-running the pipeline: `python -m app.pipeline.deliverer --send`.
+- Smoke-test the Reddit fetcher in isolation: `python -m app.pipeline.reddit_fetcher`.
 - Inspect today's stored history: `psql "$DATABASE_URL" -c "SELECT run_date, problem_name, opportunity_score FROM novelty_history WHERE run_date = CURRENT_DATE ORDER BY opportunity_score DESC;"`
+
+## Sample output (v2 format)
+
+```
+📊 Daily Opportunity Radar — May 14, 2026
+
+5 qualifying opportunities today (3 from Trends, 4 from Reddit)
+────────────────────────────────────────
+
+1. 🆕 [NEW] Filing flight cancellation claims [from: trends, reddit]
+   Category: legal  •  Score: 7.8
+   Demand: 8  •  Monetization: 9  •  Buildability: 7
+
+   💡 Proven lead-gen category; differentiation lies in speed of intake.
+
+   🎯 Potential customer: Consumer law firms — they already buy leads via Google Ads.
+
+   📝 Travellers whose flights were cancelled are searching for templates and deadlines to claim EU261 compensation before their window closes.
+
+   📌 Recurring theme — seen 3 times in the past 7 days.
+```

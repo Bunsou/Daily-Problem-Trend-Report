@@ -1,12 +1,7 @@
 import json
 
-from google import genai
-
-from config import GEMINI_API_KEY
-from fetcher import TrendEntry
-
-
-_client = genai.Client(api_key=GEMINI_API_KEY)
+from app.clients.gemini import client as _client
+from app.pipeline.fetcher import TrendEntry
 
 # Use the cheapest, fastest model for classification — accuracy matters less
 # than speed at this stage. The deep analyzer in Stage 2 catches mistakes.
@@ -154,8 +149,8 @@ def _classify_batch(trends: list[TrendEntry]) -> list[TrendEntry]:
 
 
 if __name__ == "__main__":
-    from fetcher import fetch_trends
-    from category_filter import filter_by_category
+    from app.pipeline.fetcher import fetch_trends
+    from app.pipeline.category_filter import filter_by_category
     
     print("Fetching trends...")
     trends = fetch_trends()

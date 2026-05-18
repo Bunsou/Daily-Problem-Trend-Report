@@ -10,7 +10,9 @@ from alembic import context
 load_dotenv()
 
 # Import the model metadata so autogenerate has something to compare against.
-from db import Base  # noqa: E402
+# Models must be imported (even if unused) so they register with Base.metadata.
+from app.db.base import Base  # noqa: E402
+from app.db import models  # noqa: E402, F401
 
 config = context.config
 

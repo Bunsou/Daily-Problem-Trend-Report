@@ -8,7 +8,7 @@ import time
 
 import requests
 
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from app.core.config import settings
 
 
 # Telegram caps individual messages at 4096 characters.
@@ -16,7 +16,7 @@ from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 TELEGRAM_MAX_LENGTH = 4000
 
 # Base URL for the Telegram Bot API
-_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+_API_BASE = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 
 
 class TelegramError(Exception):
@@ -55,7 +55,7 @@ def _send_single_chunk(text: str) -> None:
     """Send one chunk of text. Internal helper."""
     url = f"{_API_BASE}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": settings.telegram_chat_id,
         "text": text,
         # Disable link previews — they clutter the message visually
         "disable_web_page_preview": True,
